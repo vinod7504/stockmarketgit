@@ -1,0 +1,17 @@
+{
+  "name": "stockmarket-dashboard",
+  "version": "1.0.0",
+  "description": "Stock dashboard using Alpha Vantage API",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node backend/server.js"
+  },
+  "keywords": [
+    "stocks",
+    "alpha-vantage",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT"
+}
