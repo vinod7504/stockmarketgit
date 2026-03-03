@@ -1,0 +1,10 @@
+{
+  "name": "stockmarket-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static frontend for Netlify deployment",
+  "scripts": {
+    "build": "echo \"Static frontend: no build step required.\"",
+    "dev": "npm run build"
+  }
+}
