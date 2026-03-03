@@ -7,7 +7,7 @@
     "chart.js": "4.4.2"
   },
   "scripts": {
-    "build": "node -e \"const fs=require('fs');fs.mkdirSync('vendor',{recursive:true});fs.copyFileSync('node_modules/chart.js/dist/chart.umd.min.js','vendor/chart.umd.min.js');console.log('Prepared local Chart.js bundle');\"",
+    "build": "node -e \"const fs=require('fs');const path=require('path');const candidates=['node_modules/chart.js/dist/chart.umd.min.js','node_modules/chart.js/dist/chart.umd.js'];const src=candidates.find((p)=>fs.existsSync(p));if(!src){console.error('Chart.js bundle not found in node_modules. Run npm install in frontend/.');process.exit(1);}fs.mkdirSync('vendor',{recursive:true});const dest=path.join('vendor','chart.umd.min.js');fs.copyFileSync(src,dest);console.log(`Prepared local Chart.js bundle from ${src}`);\"",
     "dev": "npm run build"
   }
 }
