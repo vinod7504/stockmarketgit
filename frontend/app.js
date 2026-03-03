@@ -75,6 +75,7 @@ const shMfVal = document.getElementById("sh-mf-val");
 const shRetailVal = document.getElementById("sh-retail-val");
 
 const IST_TIMEZONE = "Asia/Kolkata";
+const REMOTE_API_BASE_URL = "https://stockmarketgit.onrender.com";
 
 let currentSymbol = null;
 let currentBaseSymbol = null;
@@ -84,6 +85,20 @@ let preferredExchange = "NSE";
 let currentSectorName = "";
 let currentChartRange = "1D";
 let lastSearchQuery = "";
+
+function buildApiUrl(pathOrUrl) {
+  const raw = String(pathOrUrl || "").trim();
+  if (!raw) {
+    return REMOTE_API_BASE_URL;
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    return raw;
+  }
+  if (raw.startsWith("/")) {
+    return `${REMOTE_API_BASE_URL}${raw}`;
+  }
+  return `${REMOTE_API_BASE_URL}/${raw}`;
+}
 
 function toNumber(value) {
   if (value === null || value === undefined || value === "" || value === "-") {
@@ -355,7 +370,8 @@ function updateBrokerLinks(data) {
 }
 
 async function fetchJSON(url) {
-  const res = await fetch(url);
+  const endpoint = buildApiUrl(url);
+  const res = await fetch(endpoint);
   const data = await res.json();
   if (!res.ok) {
     const detailText = Array.isArray(data?.details) ? data.details.filter(Boolean).join(" | ") : "";

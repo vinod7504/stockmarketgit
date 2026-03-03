@@ -29,6 +29,9 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "127.0.0.1";
 const STOCK_API_BASE_URL =
   process.env.INDIAN_STOCK_API_BASE_URL || DEFAULT_STOCK_API_BASE_URL;
+const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "*";
+const CORS_ALLOW_METHODS = "GET,OPTIONS";
+const CORS_ALLOW_HEADERS = "Content-Type";
 const CHART_CACHE_TTL_MS = 45000;
 const chartCache = new Map();
 const CHART_RANGE_MAP = Object.freeze({
@@ -72,6 +75,12 @@ function loadEnv(filePath) {
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));
+}
+
+function applyCorsHeaders(res) {
+  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
+  res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
 }
 
 function toNumber(value) {
@@ -1898,6 +1907,14 @@ async function handleStock(res, urlObj) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    applyCorsHeaders(res);
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     const host = req.headers.host || `localhost:${PORT}`;
     const urlObj = new URL(req.url, `http://${host}`);
 
