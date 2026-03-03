@@ -26,7 +26,7 @@ const NSE_HEADERS = {
 loadEnv(path.join(ROOT_DIR, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || "0.0.0.0";
 const STOCK_API_BASE_URL =
   process.env.INDIAN_STOCK_API_BASE_URL || DEFAULT_STOCK_API_BASE_URL;
 const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "*";
