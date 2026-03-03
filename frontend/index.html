@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FactoResearch | BSE Dashboard</title>
+    <title>FactoResearch | Stock Detail</title>
+    <link
+      rel="icon"
+      type="image/png"
+      href="https://img1.wsimg.com/isteam/ip/890c2873-45ef-40f0-a650-7817ddb60ef4/Untitled%20(512%20x%20512%20px).png/:/rs=w:89,h:89,cg:true,m/cr=w:89,h:89/qt=q:95"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -13,106 +18,423 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="bg-grid"></div>
-    <main class="page">
-      <header class="topbar">
-        <div class="brand">
-          <img src="./logo.svg" alt="FactoResearch logo" class="logo" />
+    <div class="bg-orb orb-a" aria-hidden="true"></div>
+    <div class="bg-orb orb-b" aria-hidden="true"></div>
+    <header class="site-nav">
+      <div class="nav-brand">
+        <img
+          src="https://img1.wsimg.com/isteam/ip/890c2873-45ef-40f0-a650-7817ddb60ef4/Untitled%20(512%20x%20512%20px).png/:/rs=w:89,h:89,cg:true,m/cr=w:89,h:89/qt=q:95"
+          alt="FactoResearch"
+        />
+        <div>
+          <strong>FactoResearch</strong>
+          <small>Indian Market Intelligence</small>
+        </div>
+      </div>
+      <nav class="nav-links">
+        <a href="#home-dashboard">Market Movers</a>
+        <a href="#stock-content">Stock Detail</a>
+        <a href="#sip-links">Brokers</a>
+      </nav>
+      <a class="nav-cta" href="#search-form">Start Search</a>
+    </header>
+
+    <main class="layout">
+      <header class="search-strip">
+        <div class="brand-mini">
+          <img
+            src="https://img1.wsimg.com/isteam/ip/890c2873-45ef-40f0-a650-7817ddb60ef4/Untitled%20(512%20x%20512%20px).png/:/rs=w:89,h:89,cg:true,m/cr=w:89,h:89/qt=q:95"
+            alt="FactoResearch logo"
+            class="logo"
+          />
           <div>
-            <p class="brand-tag">FactoResearch</p>
-            <h1>BSE Stock Analytics</h1>
+            <p class="brand-kicker">FactoResearch</p>
+            <h1>Indian Stock Detail</h1>
           </div>
         </div>
-        <div class="clock-card">
-          <p>Current IST</p>
-          <h2 id="live-time">--:--:--</h2>
-          <span id="live-date">--</span>
-        </div>
-      </header>
 
-      <section class="search-card">
-        <div>
-          <h3>Find BSE Stocks in INR</h3>
-          <p class="subtitle">
-            Enter company name or ticker. Results are restricted to BSE and displayed in Indian
-            Rupees only.
-          </p>
-        </div>
         <form id="search-form" class="search-form">
           <input
             id="search-input"
             type="text"
-            placeholder="Example: Reliance, TCS, HDFCBANK, INFY"
+            placeholder="Search: RELIANCE, TCS.BO, INFY.NS"
             autocomplete="off"
             required
           />
           <button type="submit">Search</button>
         </form>
-        <div id="search-status" class="search-status"></div>
-        <div id="match-list" class="match-list"></div>
-      </section>
-
-      <section id="stock-content" class="stock-content hidden">
-        <div class="title-row">
-          <div>
-            <h2 id="stock-title">-</h2>
-            <p id="stock-subtitle" class="muted">-</p>
-          </div>
-          <button id="refresh-btn" class="secondary-btn">Refresh Data</button>
+        <div class="search-exchange-switch">
+          <span>Default Exchange:</span>
+          <button id="search-pref-nse" type="button" class="chip chip-switch chip-active">NSE</button>
+          <button id="search-pref-bse" type="button" class="chip chip-switch">BSE</button>
         </div>
 
-        <section class="summary-grid" id="summary-grid"></section>
+        <div class="market-time">
+          <p id="market-time-label">Last Market Update (IST)</p>
+          <h3 id="live-time">--:--:--</h3>
+          <span id="live-date">--</span>
+        </div>
+      </header>
 
-        <section class="panel">
-          <div class="panel-head">
-            <h3>BSE Price Chart</h3>
-            <p class="muted">Latest 120 daily close prices</p>
-          </div>
-          <canvas id="price-chart" height="130"></canvas>
-        </section>
+      <div id="search-status" class="search-status"></div>
+      <div id="match-list" class="match-list"></div>
 
-        <section class="two-col">
-          <article class="panel">
-            <div class="panel-head">
-              <h3>Insider Buyers</h3>
-              <p class="muted">Recent buy-side insider filings</p>
-            </div>
-            <div id="buyers-table-wrap"></div>
+      <section id="home-dashboard" class="home-dashboard">
+        <div class="home-grid">
+          <article class="data-card">
+            <h3 class="section-title">Top Gainers (Day)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>LTP</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="day-gainers-body"></tbody>
+            </table>
           </article>
-          <article class="panel">
-            <div class="panel-head">
-              <h3>Insider Sellers</h3>
-              <p class="muted">Recent sell-side insider filings</p>
-            </div>
-            <div id="sellers-table-wrap"></div>
+
+          <article class="data-card">
+            <h3 class="section-title">Top Losers (Day)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>LTP</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="day-losers-body"></tbody>
+            </table>
           </article>
+
+          <article class="data-card">
+            <h3 class="section-title">Top Gainers (Week)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>LTP</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="week-gainers-body"></tbody>
+            </table>
+          </article>
+
+          <article class="data-card">
+            <h3 class="section-title">Top Losers (Week)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>LTP</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="week-losers-body"></tbody>
+            </table>
+          </article>
+
+          <article class="data-card">
+            <h3 class="section-title">Most Buy (Day)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>Value</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="most-buy-day-body"></tbody>
+            </table>
+          </article>
+
+          <article class="data-card">
+            <h3 class="section-title">Most Buy (Week)</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>Value</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="most-buy-week-body"></tbody>
+            </table>
+          </article>
+
+          <article class="data-card home-wide">
+            <h3 class="section-title">Top Intraday Stocks</h3>
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Stock</th>
+                  <th>Volume</th>
+                  <th>%</th>
+                </tr>
+              </thead>
+              <tbody id="intraday-body"></tbody>
+            </table>
+          </article>
+        </div>
+
+        <section class="data-card home-sector">
+          <h3 class="section-title">Sector Wise Stocks</h3>
+          <div id="sector-chip-list" class="sector-chip-list"></div>
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>LTP</th>
+                <th>%</th>
+              </tr>
+            </thead>
+            <tbody id="sector-stocks-body"></tbody>
+          </table>
         </section>
 
-        <section class="panel">
-          <div class="panel-head">
-            <h3>Related BSE Stocks</h3>
-            <p class="muted">Based on co-mentions in market news sentiment</p>
+        <div id="home-status" class="home-status"></div>
+      </section>
+
+      <section id="stock-content" class="stock-page hidden">
+        <section class="hero-card">
+          <div class="hero-head">
+            <div class="identity-wrap">
+              <div class="ticker-logo" id="ticker-logo">S</div>
+              <div>
+                <h2 id="stock-title">-</h2>
+                <p id="stock-subtitle" class="muted">-</p>
+              </div>
+            </div>
+
+            <div class="hero-actions">
+              <button type="button" class="ghost-btn">Create Alert</button>
+              <button type="button" class="ghost-btn">Watchlist</button>
+              <button id="refresh-btn" type="button" class="ghost-btn ghost-btn-strong">Refresh</button>
+            </div>
           </div>
-          <div id="related-stocks" class="related-stocks"></div>
+
+          <div class="price-row">
+            <h3 id="price-now" class="price-now">₹--</h3>
+            <p id="price-change" class="price-change">--</p>
+            <div class="tag-row">
+              <span id="exchange-badge" class="tag">--</span>
+              <span id="currency-badge" class="tag">INR</span>
+              <a id="option-chain-link" href="#" target="_blank" rel="noreferrer">Option Chain</a>
+            </div>
+          </div>
+
+          <div class="chart-wrap">
+            <div class="chart-meta-row">
+              <span id="chart-range-text">Range: 1D</span>
+              <span id="chart-last-value">Last: -</span>
+            </div>
+            <canvas id="price-chart" height="140"></canvas>
+          </div>
+
+          <div class="chip-row">
+            <button type="button" class="chip range-chip chip-active" data-range="1D">1D</button>
+            <button type="button" class="chip range-chip" data-range="1W">1W</button>
+            <button type="button" class="chip range-chip" data-range="1M">1M</button>
+            <button type="button" class="chip range-chip" data-range="3M">3M</button>
+            <button type="button" class="chip range-chip" data-range="6M">6M</button>
+            <button type="button" class="chip range-chip" data-range="1Y">1Y</button>
+            <button type="button" class="chip range-chip" data-range="5Y">5Y</button>
+            <button type="button" class="chip range-chip" data-range="ALL">All</button>
+            <button id="switch-nse" type="button" class="chip chip-switch">NSE</button>
+            <button id="switch-bse" type="button" class="chip chip-switch">BSE</button>
+          </div>
+
+          <button id="sip-toggle" type="button" class="sip-card">
+            <div class="sip-icon">₹</div>
+            <div>
+              <h4>Create Stock SIP</h4>
+              <p>Open broker apps to place your order and payment</p>
+            </div>
+            <span class="sip-arrow">›</span>
+          </button>
+          <div id="sip-links" class="sip-links hidden">
+            <a id="sip-groww-link" href="https://groww.in/stocks" target="_blank" rel="noreferrer">Groww</a>
+            <a id="sip-upstox-link" href="https://upstox.com/stocks/" target="_blank" rel="noreferrer">Upstox</a>
+            <a id="sip-zerodha-link" href="https://kite.zerodha.com/" target="_blank" rel="noreferrer">Zerodha</a>
+            <a id="sip-other-link" href="https://www.nseindia.com/invest/first-time-investor" target="_blank" rel="noreferrer"
+              >Other Demat Providers</a
+            >
+          </div>
+
+          <nav class="tab-row">
+            <button class="tab tab-active">Overview</button>
+            <button class="tab">Technicals</button>
+            <button class="tab">News</button>
+            <button class="tab">Events</button>
+            <button class="tab">F&amp;O</button>
+          </nav>
         </section>
 
-        <section class="panel">
-          <div class="panel-head">
-            <h3>Complete Fundamentals</h3>
-            <p class="muted">Full Alpha Vantage overview fields</p>
+        <section class="data-card">
+          <div class="section-title">Performance</div>
+
+          <div class="range-block">
+            <div class="range-meta">
+              <div>
+                <small>Today's Low</small>
+                <p id="today-low-value">-</p>
+              </div>
+              <div>
+                <small>Today's High</small>
+                <p id="today-high-value">-</p>
+              </div>
+            </div>
+            <div class="range-track"><span id="today-pin" class="range-pin"></span></div>
           </div>
-          <div id="overview-grid" class="overview-grid"></div>
+
+          <div class="range-block">
+            <div class="range-meta">
+              <div>
+                <small>52W Low</small>
+                <p id="week-low-value">-</p>
+              </div>
+              <div>
+                <small>52W High</small>
+                <p id="week-high-value">-</p>
+              </div>
+            </div>
+            <div class="range-track"><span id="week-pin" class="range-pin"></span></div>
+          </div>
+
+          <div class="quick-stats">
+            <article><small>Open</small><p id="stat-open">-</p></article>
+            <article><small>Prev. Close</small><p id="stat-prev-close">-</p></article>
+            <article><small>Volume</small><p id="stat-volume">-</p></article>
+            <article><small>Total Traded Value</small><p id="stat-value">-</p></article>
+            <article><small>Upper Circuit</small><p id="stat-upper">-</p></article>
+            <article><small>Lower Circuit</small><p id="stat-lower">-</p></article>
+          </div>
         </section>
 
-        <section class="panel">
-          <div class="panel-head">
-            <h3>API Warnings</h3>
-            <p class="muted">Rate-limit and partial-response notices</p>
+        <section class="data-card">
+          <div class="section-title">Fundamentals</div>
+          <div id="fundamentals-grid" class="fundamental-grid"></div>
+        </section>
+
+        <section class="data-card">
+          <div class="section-title">Financials</div>
+          <div class="financial-head">
+            <div class="financial-tabs">
+              <button class="chip chip-active">Revenue</button>
+              <button class="chip">Profit</button>
+              <button class="chip">Net Worth</button>
+            </div>
+            <small>*Snapshot view from available data</small>
           </div>
+          <canvas id="financial-chart" height="120"></canvas>
+        </section>
+
+        <section class="data-card">
+          <div class="section-title">About Company</div>
+          <p id="about-text" class="about-text">-</p>
+          <div class="about-meta">
+            <article><small>Founded</small><p id="about-founded">-</p></article>
+            <article><small>Industry</small><p id="about-industry">-</p></article>
+            <article><small>Exchange</small><p id="about-exchange">-</p></article>
+            <article><small>NSE/BSE Symbol</small><p id="about-symbol">-</p></article>
+          </div>
+        </section>
+
+        <section class="data-card">
+          <div class="section-title">Shareholding Pattern</div>
+          <div class="holding-row">
+            <div>
+              <p>Promoters</p>
+              <div class="holding-track"><span id="sh-promoters"></span></div>
+            </div>
+            <strong id="sh-promoters-val">-</strong>
+          </div>
+          <div class="holding-row">
+            <div>
+              <p>Mutual Funds</p>
+              <div class="holding-track"><span id="sh-mf"></span></div>
+            </div>
+            <strong id="sh-mf-val">-</strong>
+          </div>
+          <div class="holding-row">
+            <div>
+              <p>Retail &amp; Others</p>
+              <div class="holding-track"><span id="sh-retail"></span></div>
+            </div>
+            <strong id="sh-retail-val">-</strong>
+          </div>
+        </section>
+
+        <section class="split-grid">
+          <section class="data-card">
+            <div class="section-title">Top Mutual Funds Invested</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Fund Name</th>
+                  <th>AUM(%)</th>
+                </tr>
+              </thead>
+              <tbody id="top-funds-body"></tbody>
+            </table>
+          </section>
+
+          <section class="data-card">
+            <div class="section-title">Similar Stocks</div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Company</th>
+                  <th>Exchange</th>
+                  <th>Symbol</th>
+                </tr>
+              </thead>
+              <tbody id="similar-stocks-body"></tbody>
+            </table>
+          </section>
+        </section>
+
+        <section class="data-card">
+          <details class="raw-overview">
+            <summary>Raw Fundamentals Fields</summary>
+            <div id="overview-grid" class="overview-grid"></div>
+          </details>
+        </section>
+
+        <section class="data-card warning-card">
+          <div class="section-title">API Warnings / Provider Notes</div>
           <ul id="warning-list" class="warning-list"></ul>
         </section>
       </section>
     </main>
+    <footer class="site-footer">
+      <div class="footer-grid">
+        <section>
+          <h4>FactoResearch</h4>
+          <p>Realtime and delayed market insights for Indian equities, ETFs, and funds.</p>
+        </section>
+        <section>
+          <h5>Explore</h5>
+          <a href="#home-dashboard">Top Gainers & Losers</a>
+          <a href="#stock-content">Detailed Analytics</a>
+          <a href="#sip-links">Broker Routing</a>
+        </section>
+        <section>
+          <h5>Market</h5>
+          <span>NSE & BSE coverage</span>
+          <span>Sector-wise snapshots</span>
+          <span>Intraday + multi-range charts</span>
+        </section>
+        <section>
+          <h5>Disclaimer</h5>
+          <p>Educational use only. Verify all prices with official exchange sources before trading.</p>
+        </section>
+      </div>
+      <div class="footer-bottom">© 2026 FactoResearch. All rights reserved.</div>
+    </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script type="module" src="./app.js"></script>
