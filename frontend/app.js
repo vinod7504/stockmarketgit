@@ -90,6 +90,7 @@ const API_BASE_URL = (() => {
   return DEFAULT_REMOTE_API_BASE_URL;
 })();
 const STOCK_AUTO_REFRESH_MS = 15000;
+const MAX_LIVE_HISTORY_POINTS = 720;
 
 let currentSymbol = null;
 let currentBaseSymbol = null;
@@ -100,6 +101,7 @@ let currentSectorName = "";
 let currentChartRange = "1D";
 let lastSearchQuery = "";
 let stockAutoRefreshInFlight = false;
+const liveChartHistory = new Map();
 
 function buildApiUrl(pathOrUrl) {
   const raw = String(pathOrUrl || "").trim();
@@ -284,7 +286,7 @@ function formatPointAxisLabel(point, range = "1D") {
     day: "2-digit",
     month: "short",
     ...(isIntraday
-      ? { hour: "2-digit", minute: "2-digit", hour12: false }
+      ? { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }
       : { year: range === "1Y" || range === "5Y" || range === "ALL" ? "2-digit" : undefined })
   });
 }
@@ -295,6 +297,82 @@ function formatPointTooltipLabel(point) {
     return String(point?.date || "-");
   }
   return formatUnixToIstLabel(ts);
+}
+
+function parseDateToMs(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function chartHistoryKey(symbol, range) {
+  return `${String(symbol || "").trim().toUpperCase()}|${String(range || "1D").trim().toUpperCase()}`;
+}
+
+function normalizeRenderPoints(points, sampleTimestampMs = null) {
+  const sampleMs = toNumber(sampleTimestampMs);
+  const normalized = (Array.isArray(points) ? points : [])
+    .map((point) => {
+      const close = toNumber(point?.close);
+      if (close === null) {
+        return null;
+      }
+
+      const pointTs = toNumber(point?.timestamp);
+      const timestamp =
+        pointTs !== null
+          ? Math.floor(pointTs)
+          : sampleMs !== null
+            ? Math.floor(sampleMs)
+            : null;
+
+      return {
+        ...point,
+        close,
+        volume: toNumber(point?.volume),
+        timestamp
+      };
+    })
+    .filter(Boolean);
+
+  if (normalized.length === 1 && sampleMs !== null) {
+    normalized[0].timestamp = Math.floor(sampleMs);
+  }
+
+  return normalized;
+}
+
+function mergeSeriesWithHistory(symbol, range, incomingSeries) {
+  const key = chartHistoryKey(symbol, range);
+  const existing = Array.isArray(liveChartHistory.get(key)) ? liveChartHistory.get(key) : [];
+  const hasProviderSeries = incomingSeries.length > 1;
+  let merged = [];
+
+  if (hasProviderSeries) {
+    merged = incomingSeries.slice();
+  } else {
+    const byTs = new Map();
+    existing.forEach((point) => {
+      const ts = toNumber(point?.timestamp);
+      if (ts !== null) {
+        byTs.set(ts, point);
+      }
+    });
+    incomingSeries.forEach((point) => {
+      const ts = toNumber(point?.timestamp);
+      if (ts !== null) {
+        byTs.set(ts, point);
+      }
+    });
+    merged = Array.from(byTs.values());
+  }
+
+  merged.sort((a, b) => (toNumber(a?.timestamp) ?? 0) - (toNumber(b?.timestamp) ?? 0));
+  if (merged.length > MAX_LIVE_HISTORY_POINTS) {
+    merged = merged.slice(-MAX_LIVE_HISTORY_POINTS);
+  }
+
+  liveChartHistory.set(key, merged);
+  return merged;
 }
 
 function setActiveRangeChip(range) {
@@ -863,8 +941,10 @@ function renderFinancialChart(points, symbol) {
   });
 }
 
-function renderMainChart(points, symbol, range = "1D") {
-  const sourceSeries = Array.isArray(points) ? points.slice(-420) : [];
+function renderMainChart(points, symbol, range = "1D", options = {}) {
+  const normalizedRange = String(range || "1D").toUpperCase();
+  const incomingSeries = normalizeRenderPoints(points, options.sampleTimestampMs || null);
+  const sourceSeries = mergeSeriesWithHistory(symbol, normalizedRange, incomingSeries).slice(-420);
   let series = sourceSeries.filter((point) => toNumber(point?.timestamp) !== null);
 
   if (!series.length && sourceSeries.length) {
@@ -884,7 +964,6 @@ function renderMainChart(points, symbol, range = "1D") {
     }
   }
 
-  const normalizedRange = String(range || "1D").toUpperCase();
   const labels = series.map((d) => formatPointAxisLabel(d, normalizedRange));
   const tooltipTitles = series.map((d) => formatPointTooltipLabel(d));
   const prices = series.map((d) => toNumber(d.close));
@@ -1248,7 +1327,9 @@ async function loadChartRange(range) {
       `/api/stock/${encodeURIComponent(currentSymbol)}/chart?range=${encodeURIComponent(nextRange)}`
     );
     currentChartRange = String(payload.range || nextRange).toUpperCase();
-    renderMainChart(payload.points || [], payload.symbol || currentSymbol, currentChartRange);
+    renderMainChart(payload.points || [], payload.symbol || currentSymbol, currentChartRange, {
+      sampleTimestampMs: parseDateToMs(payload.servedAt) || Date.now()
+    });
     renderWarnings(payload.warnings || []);
     setMarketUpdateDisplay({
       ...payload,
@@ -1265,7 +1346,9 @@ async function loadChartRange(range) {
       );
       currentChartRange = String(fallback.chartRange || nextRange).toUpperCase();
       setActiveRangeChip(currentChartRange);
-      renderMainChart(fallback.chart || [], fallback.symbol || currentSymbol, currentChartRange);
+      renderMainChart(fallback.chart || [], fallback.symbol || currentSymbol, currentChartRange, {
+        sampleTimestampMs: parseDateToMs(fallback.servedAt) || Date.now()
+      });
       renderWarnings(fallback.partialErrors || []);
       setMarketUpdateDisplay(fallback);
       setStatus(`Loaded ${currentSymbol} ${currentChartRange} chart (fallback mode).`);
@@ -1303,7 +1386,9 @@ async function loadStock(symbol, requestedRange = "1D", options = {}) {
     setActiveRangeChip(currentChartRange);
 
     renderHero(data);
-    renderMainChart(data.chart || [], data.symbol || currentSymbol, currentChartRange);
+    renderMainChart(data.chart || [], data.symbol || currentSymbol, currentChartRange, {
+      sampleTimestampMs: parseDateToMs(data.servedAt) || Date.now()
+    });
     renderPerformance(data);
     renderFundamentals(data);
     renderFinancialChart(data.chart || [], data.symbol || currentSymbol);
