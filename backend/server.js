@@ -1004,27 +1004,26 @@ async function fetchYahoo(pathname, params, useSearchHost = false) {
   return data;
 }
 
-function buildSnapshotChart(stockData) {
-  const raw = [
-    ["Previous Close", stockData.previous_close],
-    ["Open", stockData.open],
-    ["Day Low", stockData.day_low],
-    ["Last Price", stockData.last_price],
-    ["Day High", stockData.day_high],
-    ["52W Low", stockData.year_low],
-    ["52W High", stockData.year_high]
-  ];
+function buildSinglePricePoint(price, timestampInput, chartRange = "1D") {
+  const close = toNumber(price);
+  if (close === null) {
+    return [];
+  }
 
-  return raw
-    .map(([label, value]) => ({
-      date: label,
+  const timestampMs = normalizeTimestampMs(timestampInput);
+  const unixSeconds = timestampMs !== null ? Math.floor(timestampMs / 1000) : null;
+
+  return [
+    {
+      date: unixSeconds !== null ? formatChartLabel(unixSeconds, chartRange) : "Last Price",
+      timestamp: timestampMs,
       open: null,
       high: null,
       low: null,
-      close: toNumber(value),
+      close,
       volume: null
-    }))
-    .filter((point) => point.close !== null);
+    }
+  ];
 }
 
 function buildOverviewFromPrimary(upstreamPayload) {
@@ -1109,7 +1108,11 @@ function buildPrimaryResponse(payload, normalizedInput, warnings = []) {
     "Primary provider returns snapshot data only. Insider and sentiment feeds are unavailable."
   );
 
-  const chart = buildSnapshotChart(data);
+  const chart = buildSinglePricePoint(
+    summary.currentPrice,
+    data.timestamp || data.last_update || null,
+    "1D"
+  );
   if (!chart.length) {
     partialErrors.push("No chart points available for this symbol from primary provider.");
   }
@@ -1695,15 +1698,11 @@ function buildNseResponse(baseSymbol, quotePayload, tradeInfoPayload, primaryErr
     currency
   };
 
-  const chart = buildSnapshotChart({
-    previous_close: summary.previousClose,
-    open: toNumber(priceInfo.open),
-    day_low: toNumber(priceInfo?.intraDayHighLow?.min),
-    last_price: summary.currentPrice,
-    day_high: toNumber(priceInfo?.intraDayHighLow?.max),
-    year_low: summary.low52Week,
-    year_high: summary.high52Week
-  });
+  const chart = buildSinglePricePoint(
+    summary.currentPrice,
+    metadata.lastUpdateTime || summary.latestTradingDay || null,
+    "1D"
+  );
 
   const partialErrors = [];
   if (primaryErrorMessage) {
@@ -1712,7 +1711,7 @@ function buildNseResponse(baseSymbol, quotePayload, tradeInfoPayload, primaryErr
 
   partialErrors.push("Serving realtime/delayed quotes from NSE official endpoint.");
   partialErrors.push("NSE fallback covers NSE symbols only. BSE symbols use other providers.");
-  partialErrors.push("Intraday candles are unavailable in NSE quote endpoint; rendered snapshot chart.");
+  partialErrors.push("Intraday candles are unavailable in NSE quote endpoint; rendered latest price point.");
   if (marketCapCrores !== null) {
     partialErrors.push("NSE market cap is converted from Crores to Rupees for display.");
   }
@@ -1799,17 +1798,9 @@ async function buildYahooResponse(normalizedInput, primaryErrorMessage, rawRange
   const currency = String(meta.currency || "INR").toUpperCase();
 
   const chart = chartBundle.points || [];
-  const fallbackSnapshot = {
-    previous_close: meta.previousClose ?? meta.chartPreviousClose,
-    open: meta.regularMarketOpen,
-    day_low: meta.regularMarketDayLow,
-    last_price: meta.regularMarketPrice,
-    day_high: meta.regularMarketDayHigh,
-    year_low: meta.fiftyTwoWeekLow,
-    year_high: meta.fiftyTwoWeekHigh
-  };
-
-  const chartData = chart.length ? chart : buildSnapshotChart(fallbackSnapshot);
+  const chartData = chart.length
+    ? chart
+    : buildSinglePricePoint(meta.regularMarketPrice, meta.regularMarketTime, rawRange);
 
   const currentPrice = toNumber(meta.regularMarketPrice) ?? chartData[chartData.length - 1]?.close ?? null;
   const previousClose = toNumber(meta.previousClose ?? meta.chartPreviousClose);
@@ -1890,7 +1881,7 @@ async function buildYahooResponse(normalizedInput, primaryErrorMessage, rawRange
   partialErrors.push("Serving realtime/delayed quotes from Yahoo Finance fallback (usually near realtime).");
 
   if (!chart.length) {
-    partialErrors.push("Intraday candle series unavailable. Rendered snapshot-based chart from latest market fields.");
+    partialErrors.push("Intraday candle series unavailable. Rendered latest price point only.");
   }
 
   if (
@@ -2246,7 +2237,7 @@ async function handleStockChart(res, urlObj) {
             requestedExchange: "BSE",
             fallbackExchange: "NSE",
             range: chartRange,
-            interval: "snapshot",
+            interval: "quote",
             marketState: nseResponse.market?.state || "UNKNOWN",
             lastTradeDate: nseResponse.market?.lastTradeDate || nseResponse.summary?.latestTradingDay || null,
             lastTradeTimeText:

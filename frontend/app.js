@@ -89,6 +89,7 @@ const API_BASE_URL = (() => {
 
   return DEFAULT_REMOTE_API_BASE_URL;
 })();
+const STOCK_AUTO_REFRESH_MS = 15000;
 
 let currentSymbol = null;
 let currentBaseSymbol = null;
@@ -98,6 +99,7 @@ let preferredExchange = "NSE";
 let currentSectorName = "";
 let currentChartRange = "1D";
 let lastSearchQuery = "";
+let stockAutoRefreshInFlight = false;
 
 function buildApiUrl(pathOrUrl) {
   const raw = String(pathOrUrl || "").trim();
@@ -862,7 +864,26 @@ function renderFinancialChart(points, symbol) {
 }
 
 function renderMainChart(points, symbol, range = "1D") {
-  const series = Array.isArray(points) ? points.slice(-420) : [];
+  const sourceSeries = Array.isArray(points) ? points.slice(-420) : [];
+  let series = sourceSeries.filter((point) => toNumber(point?.timestamp) !== null);
+
+  if (!series.length && sourceSeries.length) {
+    const preferred =
+      sourceSeries.find((point) => /last\s*price/i.test(String(point?.date || ""))) ||
+      sourceSeries[sourceSeries.length - 1];
+    const close = toNumber(preferred?.close);
+    if (close !== null) {
+      series = [
+        {
+          date: "Latest",
+          timestamp: Date.now(),
+          close,
+          volume: toNumber(preferred?.volume)
+        }
+      ];
+    }
+  }
+
   const normalizedRange = String(range || "1D").toUpperCase();
   const labels = series.map((d) => formatPointAxisLabel(d, normalizedRange));
   const tooltipTitles = series.map((d) => formatPointTooltipLabel(d));
@@ -1260,17 +1281,26 @@ async function loadStock(symbol, requestedRange = "1D", options = {}) {
   }
 
   const hadVisibleStock = !stockContent.classList.contains("hidden");
-  const { updateRoute = true, replaceRoute = false } = options;
-  currentSymbol = symbol.toUpperCase();
+  const { updateRoute = true, replaceRoute = false, silent = false } = options;
+  const prevSymbol = currentSymbol;
+  const prevRange = currentChartRange;
+  const nextSymbol = symbol.toUpperCase();
+
+  currentSymbol = nextSymbol;
   currentChartRange = String(requestedRange || currentChartRange || "1D").toUpperCase();
   setActiveRangeChip(currentChartRange);
   setPageMode(true);
-  setStatus(`Loading ${currentSymbol}...`);
+  if (!silent) {
+    setStatus(`Loading ${currentSymbol}...`);
+  }
 
   try {
     const data = await fetchJSON(
       `/api/stock/${encodeURIComponent(currentSymbol)}?range=${encodeURIComponent(currentChartRange)}`
     );
+    currentSymbol = String(data.ticker || currentSymbol).toUpperCase();
+    currentChartRange = String(data.chartRange || currentChartRange).toUpperCase();
+    setActiveRangeChip(currentChartRange);
 
     renderHero(data);
     renderMainChart(data.chart || [], data.symbol || currentSymbol, currentChartRange);
@@ -1287,16 +1317,45 @@ async function loadStock(symbol, requestedRange = "1D", options = {}) {
     if (updateRoute) {
       updateStockRoute(data.ticker || currentSymbol, replaceRoute);
     }
-    setStatus(`Loaded ${data.ticker || data.symbol}.`);
+    if (!silent) {
+      setStatus(`Loaded ${data.ticker || data.symbol}.`);
+    }
   } catch (error) {
+    currentSymbol = prevSymbol;
+    currentChartRange = prevRange;
+    setActiveRangeChip(currentChartRange || "1D");
+
+    if (silent) {
+      return;
+    }
+
     updateBrokerLinks({
-      symbol: normalizeBaseSymbol(currentSymbol),
-      name: lastSearchQuery || normalizeBaseSymbol(currentSymbol)
+      symbol: normalizeBaseSymbol(nextSymbol),
+      name: lastSearchQuery || normalizeBaseSymbol(nextSymbol)
     });
     if (!hadVisibleStock) {
       setPageMode(false);
     }
     setStatus(error.message || "Failed to load stock data.", true);
+  }
+}
+
+async function autoRefreshCurrentStock() {
+  if (!currentSymbol || stockContent.classList.contains("hidden")) {
+    return;
+  }
+  if (document.hidden || stockAutoRefreshInFlight) {
+    return;
+  }
+
+  stockAutoRefreshInFlight = true;
+  try {
+    await loadStock(currentSymbol, currentChartRange, {
+      updateRoute: false,
+      silent: true
+    });
+  } finally {
+    stockAutoRefreshInFlight = false;
   }
 }
 
@@ -1425,6 +1484,13 @@ setStatus("Search a stock to view details.");
 setPageMode(false);
 loadHomeDashboard();
 setInterval(loadHomeDashboard, 180000);
+setInterval(autoRefreshCurrentStock, STOCK_AUTO_REFRESH_MS);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    autoRefreshCurrentStock();
+  }
+});
 
 const initialRouted = parseRoutedSymbol(window.location.pathname);
 if (initialRouted) {
