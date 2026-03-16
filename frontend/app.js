@@ -75,7 +75,20 @@ const shMfVal = document.getElementById("sh-mf-val");
 const shRetailVal = document.getElementById("sh-retail-val");
 
 const IST_TIMEZONE = "Asia/Kolkata";
-const REMOTE_API_BASE_URL = "https://stockmarketgit.onrender.com";
+const DEFAULT_REMOTE_API_BASE_URL = "https://stockmarketgit.onrender.com";
+const API_BASE_URL = (() => {
+  const override = String(window.__API_BASE_URL__ || "").trim();
+  if (override) {
+    return override;
+  }
+
+  const host = String(window.location.hostname || "").toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1") {
+    return window.location.origin;
+  }
+
+  return DEFAULT_REMOTE_API_BASE_URL;
+})();
 
 let currentSymbol = null;
 let currentBaseSymbol = null;
@@ -89,15 +102,15 @@ let lastSearchQuery = "";
 function buildApiUrl(pathOrUrl) {
   const raw = String(pathOrUrl || "").trim();
   if (!raw) {
-    return REMOTE_API_BASE_URL;
+    return API_BASE_URL;
   }
   if (/^https?:\/\//i.test(raw)) {
     return raw;
   }
   if (raw.startsWith("/")) {
-    return `${REMOTE_API_BASE_URL}${raw}`;
+    return `${API_BASE_URL}${raw}`;
   }
-  return `${REMOTE_API_BASE_URL}/${raw}`;
+  return `${API_BASE_URL}/${raw}`;
 }
 
 function toNumber(value) {
@@ -185,6 +198,10 @@ function formatUnixToIstLabel(input) {
 function resolveStockUpdateText(data) {
   const market = data?.market || {};
   const overview = data?.overview || {};
+  if (data?.providerTimestampText) {
+    return String(data.providerTimestampText);
+  }
+
   if (market.lastTradeTimeText) {
     return market.lastTradeTimeText;
   }
@@ -224,12 +241,58 @@ function resolveMarketStateText(data) {
   return `Market ${stateRaw}`;
 }
 
+function formatDelayText(seconds) {
+  const n = toNumber(seconds);
+  if (n === null) {
+    return "";
+  }
+  if (n < 60) {
+    return `Delay ${Math.max(0, Math.floor(n))}s`;
+  }
+  if (n < 3600) {
+    return `Delay ${Math.floor(n / 60)}m`;
+  }
+  return `Delay ${Math.floor(n / 3600)}h`;
+}
+
 function setMarketUpdateDisplay(data) {
   const updateText = resolveStockUpdateText(data);
   const stateText = resolveMarketStateText(data);
+  const delayText = formatDelayText(data?.dataDelaySeconds);
+  const mongoText = data?.fromMongoCache ? "Mongo snapshot" : "";
   marketTimeLabel.textContent = "Last Market Update (IST)";
   liveTime.textContent = updateText || "--";
-  liveDate.textContent = stateText || "Source timestamp from exchange feed";
+  liveDate.textContent = [stateText, delayText, mongoText].filter(Boolean).join(" • ") || "Source timestamp from exchange feed";
+}
+
+function formatPointAxisLabel(point, range = "1D") {
+  const ts = toNumber(point?.timestamp);
+  if (ts === null) {
+    return String(point?.date || "-");
+  }
+
+  const dt = new Date(ts);
+  if (Number.isNaN(dt.getTime())) {
+    return String(point?.date || "-");
+  }
+
+  const isIntraday = range === "1D" || range === "1W";
+  return dt.toLocaleString("en-IN", {
+    timeZone: IST_TIMEZONE,
+    day: "2-digit",
+    month: "short",
+    ...(isIntraday
+      ? { hour: "2-digit", minute: "2-digit", hour12: false }
+      : { year: range === "1Y" || range === "5Y" || range === "ALL" ? "2-digit" : undefined })
+  });
+}
+
+function formatPointTooltipLabel(point) {
+  const ts = toNumber(point?.timestamp);
+  if (ts === null) {
+    return String(point?.date || "-");
+  }
+  return formatUnixToIstLabel(ts);
 }
 
 function setActiveRangeChip(range) {
@@ -464,7 +527,7 @@ function renderHomeRows(tbody, rows, mode = "price", emptyText = "No data availa
   tbody.innerHTML = rows
     .slice(0, 10)
     .map((row) => {
-      const ticker = getTickerFromRow(row, true);
+      const ticker = getTickerFromRow(row, false);
       const pct = toNumber(row.percentChange);
       const pctClass = pct !== null && pct < 0 ? "chg-neg" : "chg-pos";
       let middle = formatCurrency(row.lastPrice);
@@ -632,6 +695,7 @@ function renderHero(data) {
 
   const updateText = resolveStockUpdateText(data);
   const marketStateText = resolveMarketStateText(data);
+  const delayText = formatDelayText(data?.dataDelaySeconds);
   const subtitleParts = [
     data.ticker || data.symbol || "-",
     data.exchange || "-",
@@ -639,6 +703,12 @@ function renderHero(data) {
   ];
   if (marketStateText) {
     subtitleParts.push(marketStateText);
+  }
+  if (delayText) {
+    subtitleParts.push(delayText);
+  }
+  if (data?.fromMongoCache) {
+    subtitleParts.push("Mongo snapshot");
   }
 
   stockTitle.textContent = data.name || data.symbol || "-";
@@ -793,16 +863,22 @@ function renderFinancialChart(points, symbol) {
 
 function renderMainChart(points, symbol, range = "1D") {
   const series = Array.isArray(points) ? points.slice(-420) : [];
-  const labels = series.map((d) => d.date || "-");
+  const normalizedRange = String(range || "1D").toUpperCase();
+  const labels = series.map((d) => formatPointAxisLabel(d, normalizedRange));
+  const tooltipTitles = series.map((d) => formatPointTooltipLabel(d));
   const prices = series.map((d) => toNumber(d.close));
   const volumes = series.map((d) => toNumber(d.volume));
   const values = prices.filter((v) => v !== null);
   const volumeValues = volumes.filter((v) => v !== null);
   const hasVolume = volumeValues.length > 0;
   const lastPrice = values.length ? values[values.length - 1] : null;
-  const lastLabel = labels.length ? labels[labels.length - 1] : "";
+  const lastLabel = tooltipTitles.length
+    ? tooltipTitles[tooltipTitles.length - 1]
+    : labels.length
+      ? labels[labels.length - 1]
+      : "";
 
-  chartRangeText.textContent = `Range: ${range}`;
+  chartRangeText.textContent = `Range: ${normalizedRange}`;
   chartLastValue.textContent =
     lastPrice !== null ? `Last: ${formatCurrency(lastPrice)}${lastLabel ? ` • ${lastLabel}` : ""}` : "Last: -";
 
@@ -841,7 +917,7 @@ function renderMainChart(points, symbol, range = "1D") {
           borderWidth: 1.6,
           pointRadius: 0,
           pointHoverRadius: 2.5,
-          tension: 0.18,
+          tension: 0,
           fill: true,
           order: 1
         }
@@ -863,6 +939,13 @@ function renderMainChart(points, symbol, range = "1D") {
           titleColor: "#dbeafe",
           bodyColor: "#dbeafe",
           callbacks: {
+            title: (items) => {
+              const idx = items?.[0]?.dataIndex ?? -1;
+              if (idx < 0) {
+                return "";
+              }
+              return tooltipTitles[idx] || labels[idx] || "";
+            },
             label: (ctxItem) => {
               if (ctxItem.dataset.label === "Volume") {
                 return `Volume: ${formatCompact(ctxItem.parsed.y)}`;
@@ -1145,16 +1228,14 @@ async function loadChartRange(range) {
     );
     currentChartRange = String(payload.range || nextRange).toUpperCase();
     renderMainChart(payload.points || [], payload.symbol || currentSymbol, currentChartRange);
-
-    const stateRaw = String(payload.marketState || "").toUpperCase();
-    const marketState =
-      stateRaw === "REGULAR" || stateRaw === "OPEN"
-        ? "Market Open"
-        : stateRaw
-          ? `Market ${stateRaw}`
-          : "";
-    liveTime.textContent = payload.lastTradeTimeText || payload.lastTradeDate || "--";
-    liveDate.textContent = marketState || "Source timestamp from exchange feed";
+    renderWarnings(payload.warnings || []);
+    setMarketUpdateDisplay({
+      ...payload,
+      market: {
+        state: payload.marketState,
+        lastTradeTimeText: payload.lastTradeTimeText
+      }
+    });
     setStatus(`Loaded ${currentSymbol} ${currentChartRange} chart.`);
   } catch (error) {
     try {

@@ -13,5 +13,8 @@
     "dashboard"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "mongodb": "^6.20.0"
+  }
 }

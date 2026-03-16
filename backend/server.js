@@ -1,6 +1,12 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+let MongoClient = null;
+try {
+  ({ MongoClient } = require("mongodb"));
+} catch {
+  MongoClient = null;
+}
 
 const ROOT_DIR = path.join(__dirname, "..");
 const FRONTEND_DIR = path.join(ROOT_DIR, "frontend");
@@ -48,8 +54,38 @@ const CORS_ALLOW_ORIGINS = new Set(
 );
 const CORS_ALLOW_METHODS = "GET,OPTIONS";
 const CORS_ALLOW_HEADERS = "Content-Type";
-const CHART_CACHE_TTL_MS = 45000;
+const CHART_CACHE_TTL_MS = Math.max(0, Number(process.env.CHART_CACHE_TTL_MS || 15000));
+const STRICT_EXCHANGE_MATCH = String(process.env.STRICT_EXCHANGE_MATCH || "true").toLowerCase() !== "false";
+const ENABLE_CROSS_EXCHANGE_FALLBACK =
+  String(process.env.ENABLE_CROSS_EXCHANGE_FALLBACK || "false").toLowerCase() === "true";
+const MONGODB_URI = String(process.env.MONGODB_URI || "").trim();
+const MONGODB_DB_NAME = String(process.env.MONGODB_DB_NAME || "stockmarket").trim();
+const MONGODB_QUOTES_COLLECTION = String(
+  process.env.MONGODB_QUOTES_COLLECTION || "stock_snapshots"
+).trim();
+const MONGODB_CHARTS_COLLECTION = String(
+  process.env.MONGODB_CHARTS_COLLECTION || "chart_snapshots"
+).trim();
+const MONGODB_CONNECT_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.MONGODB_CONNECT_TIMEOUT_MS || 6000)
+);
+const MONGODB_MAX_STALE_MS = Math.max(
+  0,
+  Number(process.env.MONGODB_MAX_STALE_MS || 24 * 60 * 60 * 1000)
+);
+const IST_OFFSET_MINUTES = 330;
 const chartCache = new Map();
+let mongoState = {
+  promise: null,
+  retryAfterTs: 0
+};
+
+if (MONGODB_URI && !MongoClient) {
+  console.warn(
+    "[WARN] MONGODB_URI is set but mongodb package is not installed. Run `npm install mongodb`."
+  );
+}
 const CHART_RANGE_MAP = Object.freeze({
   "1D": { range: "1d", interval: "5m" },
   "1W": { range: "5d", interval: "15m" },
@@ -372,6 +408,227 @@ function parseNseLastUpdateDate(value) {
   return `${year}-${mon}-${day}`;
 }
 
+function parseNseDateTimeToUnixMs(value) {
+  const text = String(value || "").trim();
+  const match = text.match(
+    /^(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (!match) {
+    return null;
+  }
+
+  const monthMap = {
+    JAN: 0,
+    FEB: 1,
+    MAR: 2,
+    APR: 3,
+    MAY: 4,
+    JUN: 5,
+    JUL: 6,
+    AUG: 7,
+    SEP: 8,
+    OCT: 9,
+    NOV: 10,
+    DEC: 11
+  };
+
+  const day = Number(match[1]);
+  const month = monthMap[String(match[2]).toUpperCase()];
+  const year = Number(match[3]);
+  const hour = Number(match[4] || 0);
+  const minute = Number(match[5] || 0);
+  const second = Number(match[6] || 0);
+
+  if (
+    !Number.isInteger(day) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(year) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    !Number.isInteger(second)
+  ) {
+    return null;
+  }
+
+  const utcMs = Date.UTC(year, month, day, hour, minute, second) - IST_OFFSET_MINUTES * 60 * 1000;
+  return Number.isFinite(utcMs) ? utcMs : null;
+}
+
+function normalizeTimestampMs(raw) {
+  const n = toNumber(raw);
+  if (n !== null) {
+    if (n > 1_000_000_000_000) {
+      return Math.floor(n);
+    }
+    if (n > 1_000_000_000) {
+      return Math.floor(n * 1000);
+    }
+  }
+
+  const str = String(raw || "").trim();
+  if (!str) {
+    return null;
+  }
+
+  const fromNse = parseNseDateTimeToUnixMs(str);
+  if (fromNse !== null) {
+    return fromNse;
+  }
+
+  const parsed = Date.parse(str);
+  if (Number.isFinite(parsed)) {
+    return parsed;
+  }
+
+  return null;
+}
+
+function detectProviderTimestampMs(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const market = payload.market || {};
+  const overview = payload.overview || {};
+  const candidates = [
+    market.lastTradeTimestamp,
+    overview.Timestamp,
+    overview.LastUpdateTime,
+    market.lastTradeTimeText,
+    payload.lastTradeTimeText,
+    payload.lastTradeDate
+  ];
+
+  for (const candidate of candidates) {
+    const ts = normalizeTimestampMs(candidate);
+    if (ts !== null) {
+      return ts;
+    }
+  }
+
+  return null;
+}
+
+function detectChartTimestampMs(payload) {
+  const marketTs = detectProviderTimestampMs(payload);
+  if (marketTs !== null) {
+    return marketTs;
+  }
+
+  const points = Array.isArray(payload?.points) ? payload.points : [];
+  for (let idx = points.length - 1; idx >= 0; idx -= 1) {
+    const ts = normalizeTimestampMs(points[idx]?.timestamp);
+    if (ts !== null) {
+      return ts;
+    }
+  }
+
+  return null;
+}
+
+function applyFreshnessMetadata(payload, options = {}) {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const requestedTicker = String(options.requestedTicker || payload.requestedTicker || "")
+    .trim()
+    .toUpperCase();
+  const requestedExchange = String(options.requestedExchange || payload.requestedExchange || "")
+    .trim()
+    .toUpperCase();
+  const actualTicker = String(payload.ticker || "").trim().toUpperCase();
+  const actualExchange = String(
+    payload.exchange || exchangeFromTicker(actualTicker || requestedTicker)
+  ).toUpperCase();
+
+  const providerTimestampMs = options.providerTimestampMs ?? detectProviderTimestampMs(payload);
+  const nowMs = Date.now();
+  const dataDelaySeconds =
+    providerTimestampMs !== null ? Math.max(0, Math.floor((nowMs - providerTimestampMs) / 1000)) : null;
+
+  payload.requestedTicker = requestedTicker || payload.requestedTicker || actualTicker || "";
+  payload.requestedExchange = requestedExchange || payload.requestedExchange || actualExchange || null;
+  payload.actualExchange = actualExchange || null;
+  payload.actualTicker = actualTicker || null;
+  payload.isExactExchangeMatch =
+    requestedExchange && actualExchange ? requestedExchange === actualExchange : true;
+  payload.providerTimestampMs = providerTimestampMs;
+  payload.providerTimestampText =
+    providerTimestampMs !== null ? formatIstDateTimeLabel(providerTimestampMs / 1000) : null;
+  payload.dataDelaySeconds = dataDelaySeconds;
+  payload.servedAt = new Date(nowMs).toISOString();
+  payload.fromMongoCache = Boolean(options.fromMongoCache);
+  payload.mongoSnapshotAt = options.mongoSnapshotAt || null;
+  payload.meta = {
+    ...(payload.meta || {}),
+    requestedTicker: payload.requestedTicker,
+    requestedExchange: payload.requestedExchange,
+    actualTicker: payload.actualTicker,
+    actualExchange: payload.actualExchange,
+    isExactExchangeMatch: payload.isExactExchangeMatch,
+    providerTimestampMs: payload.providerTimestampMs,
+    providerTimestampText: payload.providerTimestampText,
+    dataDelaySeconds: payload.dataDelaySeconds,
+    servedAt: payload.servedAt,
+    fromMongoCache: payload.fromMongoCache,
+    mongoSnapshotAt: payload.mongoSnapshotAt
+  };
+  return payload;
+}
+
+function applyChartFreshnessMetadata(payload, options = {}) {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const requestedExchange = String(options.requestedExchange || payload.requestedExchange || "")
+    .trim()
+    .toUpperCase();
+  const requestedTicker = String(options.requestedTicker || payload.requestedTicker || "")
+    .trim()
+    .toUpperCase();
+  const actualTicker = String(payload.ticker || requestedTicker || "").trim().toUpperCase();
+  const actualExchange = String(payload.exchange || exchangeFromTicker(actualTicker)).toUpperCase();
+  const providerTimestampMs = options.providerTimestampMs ?? detectChartTimestampMs(payload);
+  const nowMs = Date.now();
+
+  payload.requestedTicker = requestedTicker || payload.requestedTicker || actualTicker || "";
+  payload.requestedExchange = requestedExchange || payload.requestedExchange || actualExchange || null;
+  payload.actualTicker = actualTicker || null;
+  payload.actualExchange = actualExchange || null;
+  payload.isExactExchangeMatch =
+    requestedExchange && actualExchange ? requestedExchange === actualExchange : true;
+  payload.providerTimestampMs = providerTimestampMs;
+  payload.providerTimestampText =
+    providerTimestampMs !== null ? formatIstDateTimeLabel(providerTimestampMs / 1000) : null;
+  payload.dataDelaySeconds =
+    providerTimestampMs !== null ? Math.max(0, Math.floor((nowMs - providerTimestampMs) / 1000)) : null;
+  payload.servedAt = new Date(nowMs).toISOString();
+  payload.fromMongoCache = Boolean(options.fromMongoCache);
+  payload.mongoSnapshotAt = options.mongoSnapshotAt || null;
+  return payload;
+}
+
+function createExchangeMismatchError(expectedExchange, actualTicker) {
+  return createProviderError(
+    `Requested ${expectedExchange} data, but provider returned ${actualTicker || "a different exchange ticker"}.`,
+    {
+      statusCode: 404,
+      provider: "Yahoo Finance"
+    }
+  );
+}
+
+function isTickerExchangeMatch(ticker, exchange) {
+  const requested = String(exchange || "").trim().toUpperCase();
+  if (!requested) {
+    return true;
+  }
+  const actual = exchangeFromTicker(ticker);
+  return requested === actual;
+}
+
 function cropCookie(item) {
   return String(item || "").split(";")[0];
 }
@@ -426,6 +683,227 @@ async function requestJson(url, options = {}) {
   }
 
   return data;
+}
+
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isMongoEnabled() {
+  return Boolean(MONGODB_URI) && Boolean(MongoClient);
+}
+
+async function getMongoCollections() {
+  if (!isMongoEnabled()) {
+    return null;
+  }
+
+  if (Date.now() < mongoState.retryAfterTs) {
+    return null;
+  }
+
+  if (!mongoState.promise) {
+    mongoState.promise = (async () => {
+      const client = new MongoClient(MONGODB_URI, {
+        serverSelectionTimeoutMS: MONGODB_CONNECT_TIMEOUT_MS
+      });
+      await client.connect();
+      const db = client.db(MONGODB_DB_NAME);
+      const quotes = db.collection(MONGODB_QUOTES_COLLECTION);
+      const charts = db.collection(MONGODB_CHARTS_COLLECTION);
+
+      await Promise.allSettled([
+        quotes.createIndex({ ticker: 1, exchange: 1, updatedAt: -1 }),
+        charts.createIndex({ ticker: 1, exchange: 1, chartRange: 1, updatedAt: -1 })
+      ]);
+
+      return { client, quotes, charts };
+    })().catch((error) => {
+      mongoState.promise = null;
+      mongoState.retryAfterTs = Date.now() + 60_000;
+      console.warn(`[WARN] MongoDB disabled temporarily: ${error?.message || "Unknown error"}`);
+      return null;
+    });
+  }
+
+  return mongoState.promise;
+}
+
+function normalizeMongoDate(input) {
+  if (!input) {
+    return null;
+  }
+  if (input instanceof Date) {
+    return Number.isFinite(input.getTime()) ? input.toISOString() : null;
+  }
+  const parsed = new Date(input);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function isSnapshotTooOld(updatedAtIso) {
+  if (MONGODB_MAX_STALE_MS <= 0) {
+    return false;
+  }
+  const ts = normalizeTimestampMs(updatedAtIso);
+  if (ts === null) {
+    return true;
+  }
+  return Date.now() - ts > MONGODB_MAX_STALE_MS;
+}
+
+async function persistStockSnapshot(payload) {
+  const collections = await getMongoCollections();
+  if (!collections || !payload) {
+    return;
+  }
+
+  const ticker = String(payload?.ticker || "").toUpperCase();
+  if (!ticker) {
+    return;
+  }
+
+  const exchange = String(payload?.exchange || exchangeFromTicker(ticker)).toUpperCase();
+  const updatedAt = new Date();
+  const providerTimestampMs = detectProviderTimestampMs(payload);
+  const doc = {
+    ticker,
+    exchange,
+    symbol: normalizeSearchSymbol(payload?.symbol || ticker),
+    source: payload?.source || "",
+    providerTimestampMs,
+    updatedAt,
+    payload: deepClone(payload)
+  };
+
+  await collections.quotes.updateOne(
+    { ticker, exchange },
+    {
+      $set: doc,
+      $setOnInsert: { createdAt: updatedAt }
+    },
+    { upsert: true }
+  );
+}
+
+async function persistChartSnapshot(payload) {
+  const collections = await getMongoCollections();
+  if (!collections || !payload) {
+    return;
+  }
+
+  const ticker = String(payload?.ticker || "").toUpperCase();
+  const exchange = String(payload?.exchange || exchangeFromTicker(ticker)).toUpperCase();
+  const chartRange = normalizeChartRange(payload?.range || payload?.chartRange || "1D");
+  if (!ticker) {
+    return;
+  }
+
+  const updatedAt = new Date();
+  const providerTimestampMs = detectChartTimestampMs(payload);
+
+  await collections.charts.updateOne(
+    { ticker, exchange, chartRange },
+    {
+      $set: {
+        ticker,
+        exchange,
+        chartRange,
+        source: payload?.source || "",
+        providerTimestampMs,
+        updatedAt,
+        payload: deepClone(payload)
+      },
+      $setOnInsert: { createdAt: updatedAt }
+    },
+    { upsert: true }
+  );
+}
+
+async function fetchStockSnapshotFromMongo(ticker, exchange) {
+  const collections = await getMongoCollections();
+  if (!collections) {
+    return null;
+  }
+
+  const normalizedTicker = String(ticker || "").trim().toUpperCase();
+  if (!normalizedTicker) {
+    return null;
+  }
+
+  const normalizedExchange = String(exchange || "").trim().toUpperCase();
+  const query = normalizedExchange
+    ? { ticker: normalizedTicker, exchange: normalizedExchange }
+    : { ticker: normalizedTicker };
+
+  const doc = await collections.quotes.findOne(query, {
+    sort: { updatedAt: -1 }
+  });
+
+  if (!doc?.payload) {
+    return null;
+  }
+
+  const updatedAtIso = normalizeMongoDate(doc.updatedAt);
+  if (isSnapshotTooOld(updatedAtIso)) {
+    return null;
+  }
+
+  return {
+    payload: deepClone(doc.payload),
+    updatedAtIso,
+    providerTimestampMs: toNumber(doc.providerTimestampMs),
+    source: doc.source || "mongodb"
+  };
+}
+
+async function fetchChartSnapshotFromMongo(ticker, exchange, chartRange) {
+  const collections = await getMongoCollections();
+  if (!collections) {
+    return null;
+  }
+
+  const normalizedTicker = String(ticker || "").trim().toUpperCase();
+  const normalizedExchange = String(exchange || "").trim().toUpperCase();
+  const normalizedRange = normalizeChartRange(chartRange);
+  if (!normalizedTicker) {
+    return null;
+  }
+
+  const query = {
+    ticker: normalizedTicker,
+    chartRange: normalizedRange
+  };
+  if (normalizedExchange) {
+    query.exchange = normalizedExchange;
+  }
+
+  const doc = await collections.charts.findOne(query, {
+    sort: { updatedAt: -1 }
+  });
+
+  if (!doc?.payload) {
+    return null;
+  }
+
+  const updatedAtIso = normalizeMongoDate(doc.updatedAt);
+  if (isSnapshotTooOld(updatedAtIso)) {
+    return null;
+  }
+
+  return {
+    payload: deepClone(doc.payload),
+    updatedAtIso,
+    providerTimestampMs: toNumber(doc.providerTimestampMs),
+    source: doc.source || "mongodb"
+  };
+}
+
+function persistInBackground(task, label) {
+  Promise.resolve(task).catch((error) => {
+    if (label) {
+      console.warn(`[WARN] ${label}: ${error?.message || "Unknown error"}`);
+    }
+  });
 }
 
 async function fetchFromPrimary(pathname, params) {
@@ -1084,7 +1562,7 @@ function setChartCache(key, value) {
   chartCache.set(key, { ts: Date.now(), value });
 }
 
-async function fetchYahooChartSeries(ticker, rawRange = "1D") {
+async function fetchYahooChartSeries(ticker, rawRange = "1D", expectedExchange = "") {
   const upperTicker = String(ticker || "").trim().toUpperCase();
   if (!upperTicker) {
     throw createProviderError("Ticker is required for chart data.", {
@@ -1119,8 +1597,15 @@ async function fetchYahooChartSeries(ticker, rawRange = "1D") {
 
   const meta = result.meta || {};
   const points = buildYahooChartSeries(result, config.chartRange);
+  const returnedTicker = String(meta.symbol || upperTicker).toUpperCase();
+  const expected = String(expectedExchange || "").trim().toUpperCase();
+  if (STRICT_EXCHANGE_MATCH && expected && !isTickerExchangeMatch(returnedTicker, expected)) {
+    throw createExchangeMismatchError(expected, returnedTicker);
+  }
+
   const payload = {
-    ticker: String(meta.symbol || upperTicker).toUpperCase(),
+    ticker: returnedTicker,
+    exchange: exchangeFromTicker(returnedTicker),
     chartRange: config.chartRange,
     interval: config.interval,
     points,
@@ -1141,20 +1626,8 @@ async function enrichResponseWithYahooChart(response, rawRange = "1D") {
   }
 
   try {
-    const chartBundle = await fetchYahooChartSeries(ticker, chartRange);
-    const returnedTicker = String(chartBundle.ticker || "").toUpperCase();
-    if (ticker.endsWith(".BO") && !returnedTicker.endsWith(".BO")) {
-      throw createProviderError(
-        "Requested BSE chart data, but chart provider returned a non-BSE ticker.",
-        { statusCode: 502, provider: "Yahoo Finance" }
-      );
-    }
-    if (ticker.endsWith(".NS") && !returnedTicker.endsWith(".NS")) {
-      throw createProviderError(
-        "Requested NSE chart data, but chart provider returned a non-NSE ticker.",
-        { statusCode: 502, provider: "Yahoo Finance" }
-      );
-    }
+    const expectedExchange = String(response?.exchange || exchangeFromTicker(ticker)).toUpperCase();
+    const chartBundle = await fetchYahooChartSeries(ticker, chartRange, expectedExchange);
 
     response.chart = chartBundle.points;
     response.chartRange = chartBundle.chartRange;
@@ -1314,15 +1787,15 @@ function buildNseResponse(baseSymbol, quotePayload, tradeInfoPayload, primaryErr
 }
 
 async function buildYahooResponse(normalizedInput, primaryErrorMessage, rawRange = "1D") {
-  const chartBundle = await fetchYahooChartSeries(normalizedInput.ticker, rawRange);
+  const chartBundle = await fetchYahooChartSeries(
+    normalizedInput.ticker,
+    rawRange,
+    normalizedInput.exchange
+  );
   const meta = chartBundle.meta || {};
   const symbol = normalizeSearchSymbol(meta.symbol || normalizedInput.baseSymbol);
   const ticker = String(chartBundle.ticker || normalizedInput.ticker).toUpperCase();
-  const exchange = String(
-    meta.fullExchangeName || exchangeFromTicker(ticker)
-  ).toUpperCase().includes("BSE")
-    ? "BSE"
-    : "NSE";
+  const exchange = String(chartBundle.exchange || exchangeFromTicker(ticker)).toUpperCase();
   const currency = String(meta.currency || "INR").toUpperCase();
 
   const chart = chartBundle.points || [];
@@ -1703,33 +2176,47 @@ async function handleStockChart(res, urlObj) {
       : null;
 
   try {
-    const chartBundle = await fetchYahooChartSeries(normalizedInput.ticker, chartRange);
+    const chartBundle = await fetchYahooChartSeries(
+      normalizedInput.ticker,
+      chartRange,
+      normalizedInput.exchange
+    );
     const ticker = String(chartBundle.ticker || normalizedInput.ticker).toUpperCase();
-    const exchange = exchangeFromTicker(ticker);
+    const exchange = String(chartBundle.exchange || exchangeFromTicker(ticker)).toUpperCase();
 
-    const warnings = [];
-    if (requestedExchange && exchange !== requestedExchange) {
-      warnings.push(
-        `Requested ${requestedExchange} chart, but provider returned ${exchange}. Showing available fallback chart.`
-      );
-    }
+    const payload = applyChartFreshnessMetadata(
+      {
+        symbol: normalizeSearchSymbol(ticker),
+        ticker,
+        exchange,
+        requestedExchange,
+        fallbackExchange: null,
+        range: chartBundle.chartRange,
+        interval: chartBundle.interval,
+        marketState: chartBundle.market?.state || "UNKNOWN",
+        lastTradeDate: chartBundle.market?.lastTradeDate || null,
+        lastTradeTimeText: chartBundle.market?.lastTradeTimeText || null,
+        points: chartBundle.points || [],
+        warnings: []
+      },
+      {
+        requestedTicker: normalizedInput.ticker,
+        requestedExchange: normalizedInput.exchange
+      }
+    );
 
-    sendJson(res, 200, {
-      symbol: normalizeSearchSymbol(ticker),
-      ticker,
-      exchange,
-      requestedExchange,
-      fallbackExchange: requestedExchange && exchange !== requestedExchange ? exchange : null,
-      range: chartBundle.chartRange,
-      interval: chartBundle.interval,
-      marketState: chartBundle.market?.state || "UNKNOWN",
-      lastTradeDate: chartBundle.market?.lastTradeDate || null,
-      lastTradeTimeText: chartBundle.market?.lastTradeTimeText || null,
-      points: chartBundle.points || [],
-      warnings
-    });
+    persistInBackground(
+      persistChartSnapshot({
+        ...payload,
+        source: "yahoo_chart_live"
+      }),
+      "Mongo chart snapshot save failed"
+    );
+
+    sendJson(res, 200, payload);
+    return;
   } catch (error) {
-    if (requestedExchange === "BSE") {
+    if (requestedExchange === "BSE" && ENABLE_CROSS_EXCHANGE_FALLBACK) {
       try {
         const nseQuote = await fetchFromNse(
           "/api/quote-equity",
@@ -1751,28 +2238,67 @@ async function handleStockChart(res, urlObj) {
           error?.message || null
         );
 
-        sendJson(res, 200, {
-          symbol: nseResponse.symbol,
-          ticker: nseResponse.ticker,
-          exchange: "NSE",
-          requestedExchange: "BSE",
-          fallbackExchange: "NSE",
-          range: chartRange,
-          interval: "snapshot",
-          marketState: nseResponse.market?.state || "UNKNOWN",
-          lastTradeDate: nseResponse.market?.lastTradeDate || nseResponse.summary?.latestTradingDay || null,
-          lastTradeTimeText:
-            nseResponse.market?.lastTradeTimeText || nseResponse.summary?.latestTradingDay || null,
-          points: nseResponse.chart || [],
-          warnings: [
-            "Requested BSE chart is currently unavailable; showing NSE fallback chart.",
-            error?.message || "Unknown provider error."
-          ]
-        });
+        const fallbackPayload = applyChartFreshnessMetadata(
+          {
+            symbol: nseResponse.symbol,
+            ticker: nseResponse.ticker,
+            exchange: "NSE",
+            requestedExchange: "BSE",
+            fallbackExchange: "NSE",
+            range: chartRange,
+            interval: "snapshot",
+            marketState: nseResponse.market?.state || "UNKNOWN",
+            lastTradeDate: nseResponse.market?.lastTradeDate || nseResponse.summary?.latestTradingDay || null,
+            lastTradeTimeText:
+              nseResponse.market?.lastTradeTimeText || nseResponse.summary?.latestTradingDay || null,
+            points: nseResponse.chart || [],
+            warnings: [
+              "Requested BSE chart is currently unavailable; showing NSE fallback chart.",
+              error?.message || "Unknown provider error."
+            ]
+          },
+          {
+            requestedTicker: normalizedInput.ticker,
+            requestedExchange: "BSE"
+          }
+        );
+
+        sendJson(res, 200, fallbackPayload);
         return;
       } catch {
-        // Continue to standard error response below.
+        // Continue to MongoDB and standard error response below.
       }
+    }
+
+    try {
+      const mongoChart = await fetchChartSnapshotFromMongo(
+        normalizedInput.ticker,
+        normalizedInput.exchange,
+        chartRange
+      );
+      if (mongoChart?.payload) {
+        const cachedPayload = applyChartFreshnessMetadata(
+          {
+            ...mongoChart.payload,
+            warnings: [
+              ...(Array.isArray(mongoChart.payload?.warnings) ? mongoChart.payload.warnings : []),
+              "Live chart feed unavailable. Showing last known MongoDB snapshot."
+            ]
+          },
+          {
+            requestedTicker: normalizedInput.ticker,
+            requestedExchange: normalizedInput.exchange,
+            fromMongoCache: true,
+            mongoSnapshotAt: mongoChart.updatedAtIso,
+            providerTimestampMs: mongoChart.providerTimestampMs
+          }
+        );
+
+        sendJson(res, 200, cachedPayload);
+        return;
+      }
+    } catch {
+      // Continue to standard error response.
     }
 
     const explicitExchangeHint = requestedSymbol.endsWith(".BO")
@@ -1783,7 +2309,12 @@ async function handleStockChart(res, urlObj) {
 
     sendJson(res, error?.statusCode || 502, {
       error: error?.message || "Failed to load chart data.",
-      details: [explicitExchangeHint].filter(Boolean)
+      details: [
+        explicitExchangeHint,
+        STRICT_EXCHANGE_MATCH
+          ? "Strict exchange mode is enabled. NSE/BSE cross-exchange substitution is blocked."
+          : null
+      ].filter(Boolean)
     });
   }
 }
@@ -1822,6 +2353,14 @@ async function handleStock(res, urlObj) {
 
     const response = buildPrimaryResponse(primaryPayload, normalizedInput);
     await enrichResponseWithYahooChart(response, chartRange);
+    applyFreshnessMetadata(response, {
+      requestedTicker: normalizedInput.ticker,
+      requestedExchange: normalizedInput.exchange
+    });
+    if (STRICT_EXCHANGE_MATCH && !response.isExactExchangeMatch) {
+      throw createExchangeMismatchError(normalizedInput.exchange, response.actualTicker);
+    }
+    persistInBackground(persistStockSnapshot(response), "Mongo stock snapshot save failed");
     sendJson(res, 200, response);
     return;
   } catch (error) {
@@ -1851,6 +2390,14 @@ async function handleStock(res, urlObj) {
         primaryError?.message || null
       );
       await enrichResponseWithYahooChart(nseResponse, chartRange);
+      applyFreshnessMetadata(nseResponse, {
+        requestedTicker: normalizedInput.ticker,
+        requestedExchange: normalizedInput.exchange
+      });
+      if (STRICT_EXCHANGE_MATCH && !nseResponse.isExactExchangeMatch) {
+        throw createExchangeMismatchError(normalizedInput.exchange, nseResponse.actualTicker);
+      }
+      persistInBackground(persistStockSnapshot(nseResponse), "Mongo stock snapshot save failed");
       sendJson(res, 200, nseResponse);
       return;
     } catch (error) {
@@ -1865,22 +2412,18 @@ async function handleStock(res, urlObj) {
       warningParts.length ? warningParts.join(" | ") : null,
       chartRange
     );
-
-    const actualExchange = String(yahooResponse.exchange || "").toUpperCase();
-    if (requestedExchange && actualExchange && actualExchange !== requestedExchange) {
-      yahooResponse.requestedExchange = requestedExchange;
-      yahooResponse.fallbackExchange = actualExchange;
-      yahooResponse.partialErrors = Array.isArray(yahooResponse.partialErrors)
-        ? yahooResponse.partialErrors
-        : [];
-      yahooResponse.partialErrors.push(
-        `Requested ${requestedExchange} quote is unavailable right now; showing ${actualExchange} fallback data.`
-      );
+    applyFreshnessMetadata(yahooResponse, {
+      requestedTicker: normalizedInput.ticker,
+      requestedExchange: normalizedInput.exchange
+    });
+    if (STRICT_EXCHANGE_MATCH && !yahooResponse.isExactExchangeMatch) {
+      throw createExchangeMismatchError(normalizedInput.exchange, yahooResponse.actualTicker);
     }
 
+    persistInBackground(persistStockSnapshot(yahooResponse), "Mongo stock snapshot save failed");
     sendJson(res, 200, yahooResponse);
   } catch (yahooError) {
-    if (requestedExchange === "BSE") {
+    if (requestedExchange === "BSE" && ENABLE_CROSS_EXCHANGE_FALLBACK) {
       try {
         const nseQuote = await fetchFromNse(
           "/api/quote-equity",
@@ -1908,19 +2451,50 @@ async function handleStock(res, urlObj) {
           warningParts.join(" | ")
         );
         await enrichResponseWithYahooChart(nseFallbackResponse, chartRange);
-        nseFallbackResponse.requestedExchange = "BSE";
-        nseFallbackResponse.fallbackExchange = "NSE";
         nseFallbackResponse.partialErrors = Array.isArray(nseFallbackResponse.partialErrors)
           ? nseFallbackResponse.partialErrors
           : [];
         nseFallbackResponse.partialErrors.push(
           "Requested BSE data is currently unavailable; showing NSE fallback data."
         );
+        applyFreshnessMetadata(nseFallbackResponse, {
+          requestedTicker: normalizedInput.ticker,
+          requestedExchange: "BSE"
+        });
         sendJson(res, 200, nseFallbackResponse);
         return;
       } catch {
-        // Continue with standard error response below.
+        // Continue with MongoDB and standard error response below.
       }
+    }
+
+    try {
+      const mongoSnapshot = await fetchStockSnapshotFromMongo(
+        normalizedInput.ticker,
+        normalizedInput.exchange
+      );
+      if (mongoSnapshot?.payload) {
+        const cached = {
+          ...mongoSnapshot.payload,
+          partialErrors: [
+            ...(Array.isArray(mongoSnapshot.payload?.partialErrors)
+              ? mongoSnapshot.payload.partialErrors
+              : []),
+            "Live quote providers are unavailable. Showing last known MongoDB snapshot."
+          ]
+        };
+        applyFreshnessMetadata(cached, {
+          requestedTicker: normalizedInput.ticker,
+          requestedExchange: normalizedInput.exchange,
+          fromMongoCache: true,
+          mongoSnapshotAt: mongoSnapshot.updatedAtIso,
+          providerTimestampMs: mongoSnapshot.providerTimestampMs
+        });
+        sendJson(res, 200, cached);
+        return;
+      }
+    } catch {
+      // Continue with standard error response.
     }
 
     const code = yahooError?.statusCode || 502;
@@ -1936,7 +2510,10 @@ async function handleStock(res, urlObj) {
         primaryError?.message,
         nseError?.message,
         yahooError?.message,
-        explicitExchangeHint
+        explicitExchangeHint,
+        STRICT_EXCHANGE_MATCH
+          ? "Strict exchange mode is enabled. NSE/BSE cross-exchange substitution is blocked."
+          : null
       ].filter(Boolean)
     });
   }
@@ -1967,6 +2544,16 @@ const server = http.createServer(async (req, res) => {
           primary: STOCK_API_BASE_URL,
           secondary: "NSE official quote/search",
           fallback: "Yahoo Finance chart/search"
+        },
+        settings: {
+          strictExchangeMatch: STRICT_EXCHANGE_MATCH,
+          chartCacheTtlMs: CHART_CACHE_TTL_MS,
+          crossExchangeFallback: ENABLE_CROSS_EXCHANGE_FALLBACK
+        },
+        mongodb: {
+          enabled: isMongoEnabled(),
+          dbName: isMongoEnabled() ? MONGODB_DB_NAME : "",
+          maxStaleMs: MONGODB_MAX_STALE_MS
         },
         authRequired: false
       });
@@ -2027,6 +2614,9 @@ server.on("error", (error) => {
 
 server.on("listening", () => {
   console.log(`Server running on http://${HOST}:${activePort}`);
+  console.log(
+    `[INFO] strictExchangeMatch=${STRICT_EXCHANGE_MATCH} chartCacheTtlMs=${CHART_CACHE_TTL_MS} mongodb=${isMongoEnabled()}`
+  );
 });
 
 server.listen(activePort, HOST);
