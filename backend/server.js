@@ -29,7 +29,23 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const STOCK_API_BASE_URL =
   process.env.INDIAN_STOCK_API_BASE_URL || DEFAULT_STOCK_API_BASE_URL;
-const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "*";
+const DEFAULT_CORS_ALLOW_ORIGINS = [
+  "https://stockmarketfactoresearch.netlify.app",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173"
+];
+const CORS_ALLOW_ORIGINS = new Set(
+  String(
+    process.env.CORS_ALLOW_ORIGINS ||
+      process.env.CORS_ALLOW_ORIGIN ||
+      DEFAULT_CORS_ALLOW_ORIGINS.join(",")
+  )
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+);
 const CORS_ALLOW_METHODS = "GET,OPTIONS";
 const CORS_ALLOW_HEADERS = "Content-Type";
 const CHART_CACHE_TTL_MS = 45000;
@@ -77,8 +93,29 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
-function applyCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
+function resolveCorsAllowOrigin(req) {
+  const requestOrigin = String(req?.headers?.origin || "").trim();
+  if (!requestOrigin) {
+    return "*";
+  }
+
+  if (CORS_ALLOW_ORIGINS.has("*")) {
+    return "*";
+  }
+
+  if (CORS_ALLOW_ORIGINS.has(requestOrigin)) {
+    return requestOrigin;
+  }
+
+  return "";
+}
+
+function applyCorsHeaders(req, res) {
+  const allowOrigin = resolveCorsAllowOrigin(req);
+  if (allowOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+  }
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
   res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
 }
@@ -1907,7 +1944,7 @@ async function handleStock(res, urlObj) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    applyCorsHeaders(res);
+    applyCorsHeaders(req, res);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
