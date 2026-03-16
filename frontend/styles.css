@@ -118,6 +118,11 @@ small {
   gap: 10px;
 }
 
+.brand-home {
+  text-decoration: none;
+  color: inherit;
+}
+
 .nav-brand img {
   width: 36px;
   height: 36px;
